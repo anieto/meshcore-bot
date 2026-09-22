@@ -1232,6 +1232,23 @@ class BaseCommand(ABC):
             path_string = path_string.split(" via ROUTE_TYPE_")[0]
         return path_string.strip() or "Unknown"
 
+    def get_path_hex_list(self, message: MeshMessage) -> str:
+        """Comma-joined raw hop hex prefixes, no '({N} hops)' suffix and no
+        'Direct'/'Unknown' fallback text — for embedding directly in a URL
+        (e.g. a CoreScope map deep-link) rather than for display. Empty
+        string when there's no resolvable multi-hop path, so a template can
+        gate on it the same way it already does for packet_hash.
+        """
+        routing_info = getattr(message, 'routing_info', None)
+        if routing_info is not None:
+            path_length = routing_info.get('path_length', 0)
+            if path_length == 0:
+                return ""
+            path_nodes = routing_info.get('path_nodes', [])
+            if path_nodes:
+                return ','.join(str(n).lower() for n in path_nodes)
+        return ""
+
     def build_enhanced_connection_info(self, message: MeshMessage) -> str:
         """Build enhanced connection info with SNR, RSSI, and parsed route information.
         Uses message.routing_info when present (multi-byte path, direct) for path part.
@@ -1279,6 +1296,7 @@ class BaseCommand(ABC):
             'sender': message.sender_id or "Unknown",
             'connection_info': self.build_enhanced_connection_info(message),
             'path': self.get_path_display_string(message),
+            'path_hex': self.get_path_hex_list(message),
             'hops': hops,
             'hops_label': hops_label,
             'timestamp': self.format_timestamp(message),

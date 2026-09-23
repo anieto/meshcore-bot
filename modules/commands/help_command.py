@@ -166,6 +166,36 @@ class HelpCommand(BaseCommand):
                 return False
         return True
 
+    def _is_command_enabled(self, cmd_instance: Any) -> bool:
+        """Whether this command's own config section explicitly disables it.
+
+        There's no single uniform "enabled" attribute across plugins to read
+        (confirmed by inspecting several: self.catfact_enabled, self.enabled,
+        self.command_enabled, self.dice_enabled, ... all different names) --
+        so this goes straight to each command's own config section instead,
+        via the same _derive_config_section_name() every command already
+        uses internally (base_command.py) to look up its own enabled flag.
+
+        Deliberately only hides a command when the deployed config
+        *explicitly* sets `enabled = false` -- an absent section is always
+        treated as enabled here, regardless of that specific plugin's own
+        internal fallback default (a couple, e.g. announcements, default to
+        disabled when unset). The goal is narrowly "respect what an operator
+        deliberately turned off," not to fully replicate every plugin's
+        individual fallback semantics, which would need a plugin-by-plugin
+        lookup table instead of one generic check.
+        """
+        if not hasattr(cmd_instance, '_derive_config_section_name'):
+            return True
+        try:
+            section = cmd_instance._derive_config_section_name()
+            raw = self.bot.config.get(section, 'enabled', fallback=None)
+        except Exception:
+            return True
+        if raw is None:
+            return True
+        return str(raw).strip().lower() not in ('false', '0', 'no', 'off')
+
     # Reserved suffix appended by command_manager.get_general_help (must match there)
     HELP_LIST_SUFFIX = " | More: 'help <command>'"
 
@@ -199,6 +229,8 @@ class HelpCommand(BaseCommand):
             primary_names = set()
             for cmd_name, cmd_instance in self.bot.command_manager.commands.items():
                 if not self._is_command_valid_for_channel(cmd_name, cmd_instance, message):
+                    continue
+                if not self._is_command_enabled(cmd_instance):
                     continue
                 primary_name = cmd_instance.name if hasattr(cmd_instance, 'name') else cmd_name
                 primary_names.add(primary_name)
@@ -255,9 +287,10 @@ class HelpCommand(BaseCommand):
                                 command_counts[primary_name] += count
             except Exception as e:
                 self.logger.debug(f"Error querying command stats: {e}")
-                # If stats table doesn't exist or query fails, fall back to all commands
-                for cmd_name in self.bot.command_manager.commands:
-                    primary_name = self.bot.command_manager.commands[cmd_name].name if hasattr(self.bot.command_manager.commands[cmd_name], 'name') else cmd_name
+                # If stats table doesn't exist or query fails, fall back to all
+                # commands -- but still only the already-filtered primary_names,
+                # not every loaded command regardless of channel/enabled status.
+                for primary_name in primary_names:
                     command_counts[primary_name] = 0
 
             # Ensure every channel-valid command appears even if it has no usage stats
@@ -278,11 +311,12 @@ class HelpCommand(BaseCommand):
                 # Extract just the command names (only primary names, no aliases)
                 command_names = [name for name, _ in sorted_commands]
             else:
-                # Fallback: use all primary command names (filtered by channel)
+                # Fallback: use all primary command names (filtered by channel + enabled)
                 command_names = sorted([
                     cmd.name if hasattr(cmd, 'name') else name
                     for name, cmd in self.bot.command_manager.commands.items()
                     if self._is_command_valid_for_channel(name, cmd, message)
+                    and self._is_command_enabled(cmd)
                 ])
 
             # Apply max_length truncation when reserved for suffix (e.g. " | More: 'help <command>'")
@@ -290,11 +324,12 @@ class HelpCommand(BaseCommand):
 
         except Exception as e:
             self.logger.error(f"Error getting available commands list: {e}")
-            # Fallback to simple list of all command names (filtered by channel)
+            # Fallback to simple list of all command names (filtered by channel + enabled)
             command_names = sorted([
                 cmd.name if hasattr(cmd, 'name') else name
                 for name, cmd in self.bot.command_manager.commands.items()
-                if self._is_command_valid_for_channel(name, cmd, message)
+                if self._is_command_enabled(cmd)
+                and self._is_command_valid_for_channel(name, cmd, message)
             ])
             return self._format_commands_list_to_length(command_names, max_length)
 

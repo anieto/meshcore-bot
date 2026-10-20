@@ -48,7 +48,7 @@ class TestCommand(BaseCommand):
              {"value": "mi", "label": "Miles"},
          ],
          "default": "auto",
-         "help": "Unit for {path_distance} and {firstlast_distance}."},
+         "help": "Unit for {path_distance}, {path_dist} and {firstlast_distance}."},
     ]
 
     def __init__(self, bot):
@@ -742,6 +742,7 @@ class TestCommand(BaseCommand):
         try:
             fields = self.get_standard_placeholder_fields(message)
             phrase_part = f": {phrase}" if phrase else ""
+            path_distance = self._calculate_path_distance(message) or ''
             fields.update({
                 'sender': message.sender_id or self.translate('common.unknown_sender'),
                 'phrase': phrase,
@@ -749,7 +750,11 @@ class TestCommand(BaseCommand):
                 'elapsed': self.format_elapsed(message),
                 'snr': str(message.snr) if message.snr is not None else self.translate('common.unknown'),
                 'rssi': str(message.rssi) if message.rssi is not None else self.translate('common.unknown'),
-                'path_distance': self._calculate_path_distance(message) or '',
+                'path_distance': path_distance,
+                # Distance alone, without the "(N segs, M no-loc)" detail, for
+                # replies that need to fit the channel byte budget. Empty for
+                # a direct message, where path_distance is "N/A".
+                'path_dist': '' if path_distance == 'N/A' else path_distance.split(' (', 1)[0],
                 'firstlast_distance': self._calculate_firstlast_distance(message) or '',
             })
             if extra:

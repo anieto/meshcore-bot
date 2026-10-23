@@ -37,7 +37,14 @@ from ..commands.rain_command import (
     reverse_geocode_region,
 )
 from ..http_retry import make_retry_session
-from ..nws_alerts import SERVICE_SPECIAL_RULES, entry_nws_headline, entry_summary, entry_title, parse_alert_fields
+from ..nws_alerts import (
+    SERVICE_SPECIAL_RULES,
+    entry_nws_headline,
+    entry_summary,
+    entry_title,
+    node_value,
+    parse_alert_fields,
+)
 from ..nws_coverage import NWSNoCoverageCache
 from ..url_shortener import shorten_url_sync
 from ..utils import format_temperature_high_low, get_config_timezone
@@ -57,6 +64,9 @@ FORECAST_MISFIRE_GRACE_SECONDS = 300
 FORECAST_RETRY_OFFSETS_SECONDS = (300, 900, 1800)
 FORECAST_RETRY_JOB_ID = "weather_daily_forecast_retry"
 TRANSIENT_FORECAST_HTTP_STATUSES = frozenset({429, 500, 502, 503, 504})
+NWS_ALERTS_URL = "https://api.weather.gov/alerts/active.atom"
+# NWS UGC codes: state, C (county) or Z (forecast/fire zone), three digits.
+NWS_ZONE_RE = re.compile(r"^[A-Z]{2}[CZ]\d{3}$")
 
 
 @dataclass(frozen=True)
@@ -96,6 +106,16 @@ class WeatherService(BaseServicePlugin):
                  "NOAA alerts are US-only."},
         {"key": "poll_weather_alerts_interval", "label": "Alert poll interval", "type": "int",
          "min": 1000, "default": 600000, "unit": "ms", "help": "How often to check for new alerts."},
+        {"key": "alerts_zones", "label": "Alert zones", "type": "str", "default": "",
+         "help": "Comma-separated NWS county/zone codes (e.g. TXC029, TXZ205) to watch instead of the "
+                 "bot's position. List both the county (C) and forecast zone (Z) codes: storm warnings "
+                 "use counties, most watches and advisories use zones."},
+        {"key": "alerts_area", "label": "Alert area", "type": "str", "default": "",
+         "help": "Comma-separated state codes (e.g. TX) to watch when alert zones are blank. "
+                 "Blank = the bot's position."},
+        {"key": "alerts_events", "label": "Alert types", "type": "str", "default": "",
+         "help": "Comma-separated NWS event names to post (e.g. Tornado Warning, Flood Watch). "
+                 "Blank = every alert."},
         {"key": "rain_nowcast_enabled", "label": "Rain nowcast", "type": "bool", "default": False,
          "help": "Push a heads-up when rain is about to start at the bot's position."},
         {"key": "rain_channel", "label": "Rain nowcast channel", "type": "str", "default": "",
@@ -155,6 +175,14 @@ class WeatherService(BaseServicePlugin):
         # NOAA alert monitoring. On by default: the loop has always run whenever the
         # service did, so defaulting off would silently drop alerts on upgrade.
         self.weather_alerts_enabled = self.bot.config.getboolean('Weather_Service', 'weather_alerts_enabled', fallback=True)
+
+        # Where alerts come from: NWS zones, else state codes, else the bot's position.
+        self.alerts_zones = self._load_alert_zones()
+        self.alerts_area = [
+            a.upper() for a in self._config_list('alerts_area') if re.fullmatch(r"[A-Za-z]{2}", a)
+        ]
+        # Which NWS event names to post (lowercased); empty = all.
+        self.alerts_events = {e.lower() for e in self._config_list('alerts_events')}
 
         # Polling intervals (in milliseconds, converted to seconds)
         self.blitz_collection_interval = self.bot.config.getint('Weather_Service', 'blitz_collection_interval', fallback=600000) / 1000.0
@@ -947,6 +975,32 @@ class WeatherService(BaseServicePlugin):
         else:
             return "🌤️"
 
+    def _config_list(self, key: str) -> list[str]:
+        """Comma-separated ``[Weather_Service]`` value as a list of non-empty, stripped items."""
+        raw = self.bot.config.get('Weather_Service', key, fallback='') or ''
+        return [item.strip() for item in raw.split(',') if item.strip()]
+
+    def _load_alert_zones(self) -> list[str]:
+        """``alerts_zones`` as upper-case NWS UGC codes, warning about and dropping malformed ones."""
+        zones = []
+        for zone in self._config_list('alerts_zones'):
+            zone = zone.upper()
+            if NWS_ZONE_RE.match(zone):
+                zones.append(zone)
+            else:
+                self.logger.warning("Ignoring alerts_zones entry %r: expected an NWS code like TXC029 or TXZ205", zone)
+        return zones
+
+    def _alerts_url(self) -> str:
+        """NWS active-alerts ATOM URL for the configured zones, area, or bot position."""
+        if self.alerts_zones:
+            return f"{NWS_ALERTS_URL}?zone={','.join(self.alerts_zones)}"
+        if self.alerts_area:
+            return f"{NWS_ALERTS_URL}?area={','.join(self.alerts_area)}"
+        lat_rounded = round(self.my_position_lat, 4)
+        lon_rounded = round(self.my_position_lon, 4)
+        return f"{NWS_ALERTS_URL}?point={lat_rounded},{lon_rounded}"
+
     async def _poll_weather_alerts_loop(self) -> None:
         """Background task to poll for weather alerts.
 
@@ -979,17 +1033,15 @@ class WeatherService(BaseServicePlugin):
                 # Subsequent checks: only get alerts since last check
                 time_window_start = self.last_alert_check_time
 
+            # Zones and areas are NWS codes, so the no-coverage cache only applies to the point.
+            by_point = not (self.alerts_zones or self.alerts_area)
             lat, lon = self.my_position_lat, self.my_position_lon
-            if self._nws_no_coverage.is_unavailable(lat, lon):
+            if by_point and self._nws_no_coverage.is_unavailable(lat, lon):
                 self.logger.debug("Skipping NWS weather alerts for cached point %s,%s outside NWS coverage", round(lat, 2), round(lon, 2))
                 return
 
-            # Round coordinates
-            lat_rounded = round(lat, 4)
-            lon_rounded = round(lon, 4)
-
             # NOAA alerts API (US-only)
-            alert_url = f"https://api.weather.gov/alerts/active.atom?point={lat_rounded},{lon_rounded}"
+            alert_url = self._alerts_url()
 
             try:
                 alert_data, alert_text = await asyncio.to_thread(
@@ -998,7 +1050,7 @@ class WeatherService(BaseServicePlugin):
                     timeout=10,
                 )
                 if not alert_data.ok:
-                    if nws_http_means_no_coverage(alert_data.status_code):
+                    if by_point and nws_http_means_no_coverage(alert_data.status_code):
                         if self._nws_no_coverage.mark_unavailable(lat, lon):
                             self.logger.warning(
                                 "NWS weather alerts unavailable (HTTP %s); NOAA alerts are US-only; "
@@ -1012,7 +1064,8 @@ class WeatherService(BaseServicePlugin):
                 self.logger.debug(f"Timeout/connection error fetching alerts: {e}")
                 return
 
-            self._nws_no_coverage.mark_available(lat, lon)
+            if by_point:
+                self._nws_no_coverage.mark_available(lat, lon)
 
             # Parse ATOM feed with full metadata extraction (same as wx_command)
             alerts = []
@@ -1039,7 +1092,7 @@ class WeatherService(BaseServicePlugin):
             self.logger.error(f"Error checking weather alerts: {e}")
 
     def _collect_alert_entry(self, entry: Any, alerts: list, time_window_start: float, current_check_time: float) -> None:
-        """Parse one ATOM alert entry and append it to ``alerts`` when it is unseen and issued inside the window."""
+        """Parse one ATOM alert entry and append it to ``alerts`` when it is unseen, of a wanted type, and issued inside the window."""
         # Get alert ID
         alert_id_elem = entry.getElementsByTagName("id")
         if not alert_id_elem or not alert_id_elem[0].childNodes:
@@ -1051,6 +1104,10 @@ class WeatherService(BaseServicePlugin):
 
         # Skip if we've already seen this alert
         if alert_id in self.seen_alert_ids:
+            return
+
+        if not self._wanted_alert_event(entry):
+            self.seen_alert_ids.add(alert_id)
             return
 
         # Get entry updated timestamp (most reliable - when alert was last updated/issued)
@@ -1086,6 +1143,17 @@ class WeatherService(BaseServicePlugin):
             # Alert is older than our window, mark as seen but don't send
             self.seen_alert_ids.add(alert_id)
             self.logger.debug(f"Skipping old alert {alert_id} (issued {datetime.fromtimestamp(alert_issued_time)} before time window start {datetime.fromtimestamp(time_window_start)})")
+
+    def _wanted_alert_event(self, entry: Any) -> bool:
+        """True when ``alerts_events`` is unset or lists this entry's CAP event name."""
+        if not self.alerts_events:
+            return True
+        event_elems = entry.getElementsByTagName("cap:event")
+        event = node_value(event_elems[0]).strip() if event_elems else ""
+        if event.lower() in self.alerts_events:
+            return True
+        self.logger.debug("Skipping %s alert: not in alerts_events", event or "untyped")
+        return False
 
     async def _send_new_alerts(self, alerts: list) -> None:
         """Send each new alert to the alerts channel, two seconds apart."""

@@ -2292,6 +2292,22 @@ weather_alerts_enabled = true
 # Default: 600000 (10 minutes)
 poll_weather_alerts_interval = 600000
 
+# Where to watch for alerts. By default the service posts alerts covering the bot's
+# position (my_position_lat/lon). To watch an area instead, list NWS county and zone
+# codes in alerts_zones (look a place up at https://api.weather.gov/points/LAT,LON).
+# Include both the county code (C, e.g. TXC029) and the forecast zone (Z, e.g. TXZ205):
+# storm-based warnings are issued by county, most watches and advisories by zone.
+# alerts_area takes state codes (e.g. TX) and is used only when alerts_zones is blank.
+# Default: blank (bot position)
+alerts_zones =
+alerts_area =
+
+# Only post these NWS event names, comma-separated, exactly as NWS spells them
+# (https://api.weather.gov/alerts/types). Blank posts every alert.
+# Example: Tornado Warning, Tornado Watch, Severe Thunderstorm Warning, Flash Flood Warning
+# Default: blank (all)
+alerts_events =
+
 # --- Proactive rain nowcast ("rain incoming" push) ---
 # Automatically posts a heads-up to a channel when precipitation is about to
 # start at the bot's position (my_position_lat/lon above), using Open-Meteo's

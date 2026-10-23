@@ -48,6 +48,33 @@ alerts_channel = #weather         # Channel for weather alerts
 poll_weather_alerts_interval = 600000  # Check for alerts every 10 minutes (milliseconds)
 ```
 
+### Alert Area and Types
+
+By default the service posts alerts that cover the bot's position. To watch an
+area, list NWS county and zone codes; to cut the noise, list the event names to
+post:
+
+```ini
+# Bexar County, Texas: county code and forecast zone
+alerts_zones = TXC029, TXZ205
+# Or whole states (used only when alerts_zones is blank)
+# alerts_area = TX
+# Blank = every alert
+alerts_events = Tornado Warning, Tornado Watch, Severe Thunderstorm Warning, Flash Flood Warning
+```
+
+- List **both** codes for each county. Storm-based warnings (tornado, severe
+  thunderstorm, flash flood) are issued by county (`TXC029`); most watches and
+  advisories are issued by forecast zone (`TXZ205`). Look a place up at
+  `https://api.weather.gov/points/LAT,LON` (`county` and `forecastZone`).
+- A point only matches a storm warning whose polygon covers that exact spot, so
+  zones also catch warnings elsewhere in the county.
+- Event names are matched case-insensitively against the CAP event, spelled as
+  in `https://api.weather.gov/alerts/types` (e.g. `Flood Watch`,
+  `Severe Weather Statement`).
+- A state-wide area can mean dozens of alerts on a stormy day, and every one is a
+  flood across the mesh. Prefer a short zone list plus `alerts_events`.
+
 ### Rain Nowcast (Proactive)
 
 Automatically posts a heads-up when rain is about to start at your position:
